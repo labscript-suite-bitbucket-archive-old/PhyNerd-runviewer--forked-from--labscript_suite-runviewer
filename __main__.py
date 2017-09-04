@@ -93,24 +93,24 @@ SHOT_MODEL__CHECKBOX_INDEX = 2
 SHOT_MODEL__PATH_INDEX = 1
 CHANNEL_MODEL__CHECKBOX_INDEX = 0
 CHANNEL_MODEL__CHANNEL_INDEX = 0
-MARKERS_VERT_AMOUNT = 5
 
 
 def format_time(input_sec):
     # inout is the time in sec
-    if input_sec >= 1:
+    sig_digit = numpy.round(numpy.log10(input_sec), 5)
+    if sig_digit >= 0:
         return "{:.3g}s".format(input_sec)
-    elif input_sec >= 1e-3:
+    elif sig_digit >= -3:
         return "{:.3g}ms".format(input_sec * 1e3)
-    elif input_sec >= 1e-6:
+    elif sig_digit >= -6:
         return "{:.3g}us".format(input_sec * 1e6)
-    elif input_sec >= 1e-9:
+    elif sig_digit >= -9:
         return "{:.3g}ns".format(input_sec * 1e9)
-    elif input_sec >= 1e-12:
+    elif sig_digit >= -12:
         return "{:.3g}ps".format(input_sec * 1e12)
-    elif input_sec >= 1e-15:
+    elif sig_digit >= -15:
         return "{:.3g}fs".format(input_sec * 1e15)
-    elif input_sec >= 1e-18:
+    elif sig_digit >= -18:
         return "{:.3g}as".format(input_sec * 1e18)
     else:
         return str(input_sec) + "s"
@@ -211,6 +211,7 @@ class ScaleHandler():
         for index, i in enumerate(self.internal_list):
             if i.scaled_start <= input_scaled_t and i.scaled_end >= input_scaled_t:
                 return i.get_unscaled_time(input_scaled_t)
+        return input_scaled_t - self.scaled_stop_time + self.org_stop_time
 
 
 class ColourDelegate(QItemDelegate):
@@ -297,35 +298,36 @@ class RunViewer(object):
         # create a hidden plot widget that all plots can link their x-axis too
         time_axis_plot = pg.PlotWidget(name='runviewer - time axis link')
 
-        time_axis_plot.setMinimumHeight(40 + 12 * MARKERS_VERT_AMOUNT)
-        time_axis_plot.setMaximumHeight(40 + 12 * MARKERS_VERT_AMOUNT)
+        time_axis_plot.setMinimumHeight(120)
+        time_axis_plot.setMaximumHeight(120)
         time_axis_plot.setLabel('bottom', 'Time', units='s')
         time_axis_plot.showAxis('right', True)
         time_axis_plot.setMouseEnabled(y=False)
         time_axis_plot.getAxis('left').setTicks([])  # hide y ticks in the left & right side. only show time axis
         time_axis_plot.getAxis('right').setTicks([])
-        time_axis_plot.setLabel('left', 'Slots')
-        time_axis_plot.scene().sigMouseMoved.connect(lambda pos: self.mouseMovedEvent(pos, time_axis_plot))
+        labelStyle = {'font-size': '8pt'}
+        time_axis_plot.setLabel('left', 'Slots', units=None, **labelStyle)
+        time_axis_plot.scene().sigMouseMoved.connect(lambda pos: self.mouseMovedEvent(pos, time_axis_plot, "Slots"))
         time_axis_plot_item = time_axis_plot.plot([0, 1], [0, 0], pen=(255, 255, 255))
         self._time_axis_plot = (time_axis_plot, time_axis_plot_item)
 
         self.all_markers = {}
         self.all_marker_items = {}
         markers_plot = pg.PlotWidget(name='runviewer - markers')
-        markers_plot.setMinimumHeight(17 * MARKERS_VERT_AMOUNT)  # 65)
-        markers_plot.setMaximumHeight(17 * MARKERS_VERT_AMOUNT)  # 65)
+        markers_plot.setMinimumHeight(120)
+        markers_plot.setMaximumHeight(120)
         markers_plot.showAxis('top', False)
         markers_plot.showAxis('bottom', False)
         markers_plot.showAxis('left', True)
         markers_plot.showAxis('right', True)
         markers_plot.getAxis('left').setTicks([])
         markers_plot.getAxis('right').setTicks([])
-        markers_plot.setLabel('left', 'Marker')
+        labelStyle = {'font-size': '8pt'}
+        markers_plot.setLabel('left', 'Markers', **labelStyle)
         markers_plot.setXLink('runviewer - time axis link')
         markers_plot.setMouseEnabled(y=False)
-        markers_plot.setYRange(0, MARKERS_VERT_AMOUNT + 0.5)
         markers_plot_item = markers_plot.plot([])
-        markers_plot.scene().sigMouseMoved.connect(lambda pos: self.mouseMovedEvent(pos, markers_plot))
+        markers_plot.scene().sigMouseMoved.connect(lambda pos: self.mouseMovedEvent(pos, markers_plot, "Markers"))
         self._markers_plot = (markers_plot, markers_plot_item)
 
         markers_plot.setParent(self.ui.scrollArea_2)
@@ -406,12 +408,11 @@ class RunViewer(object):
         self._shots_to_process_thread.daemon = True
         self._shots_to_process_thread.start()
 
-        self._tooltip = {'text': "", "pos": None}
         self.scale_time = False
         self.scaler = numpy.vectorize(lambda x: x)
         self.scalehandler = None
 
-    def mouseMovedEvent(self, position, ui):
+    def mouseMovedEvent(self, position, ui, name):
         v = ui.scene().views()[0]
         viewP = v.mapFromScene(position)
         glob_pos = ui.mapToGlobal(viewP)  # convert to Screen x
@@ -424,39 +425,15 @@ class RunViewer(object):
         coord_pos = ui.plotItem.vb.mapSceneToView(position)
 
         if len(self.get_selected_shots_and_colours()) > 0:
-            unscaled_t = coord_pos.x()
-            if unscaled_t is not None:
-                self._tooltip["pos"] = QPoint(glob_pos.x(), glob_pos.y())
-                self._tooltip["text"] = "Curs: {:.4f}ms".format(unscaled_t * 1000)
-                QToolTip.showText(self._tooltip["pos"], self._tooltip["text"])
+            if self.scale_time and self.scalehandler is not None:
+                unscaled_t = self.scalehandler.get_unscaled_time(coord_pos.x())
             else:
-                self._tooltip["text"] = ""
-        else:
-            self._tooltip["text"] = ""
+                unscaled_t = coord_pos.x()
 
-    # def scaleFunction(self, t):
-    #     if self.scale_time and len(self.all_markers) > 0:
-    #         # only scale times between start and stop time of the marker shot
-    #         if t <= self.stoptime:
-    #             return self.scalehandler.get_scaled_time(t)
-    #             # # append start and stop_time to markertimes list
-    #             # marker_times = list(self.all_markers.keys())
-    #             # if 0 not in marker_times:
-    #             #     marker_times.append(0)
-    #             # if self.stoptime not in marker_times:
-    #             #     marker_times.append(self.stoptime)
-    #             # marker_times.sort()
-
-    #             # # determin nearest marker before t and after t
-    #             # indexlist = numpy.where(numpy.asarray(marker_times) >= t)[0]
-    #             # bigger_index = indexlist[0]
-    #             # t2 = marker_times[bigger_index]
-    #             # t1 = marker_times[bigger_index-1]
-    #             # return ((t - t1)/(t2 - t1) + bigger_index - 1) / (len(marker_times)-1) * self.stoptime
-    #         else:
-    #             return t
-    #     else:
-    #         return t
+            if unscaled_t is not None:
+                pos = QPoint(glob_pos.x(), glob_pos.y())
+                text = "Plot: {} \nTime: {:.4f}ms\nValue: {:.2f}".format(name, unscaled_t * 1000, coord_pos.y())
+                QToolTip.showText(pos, text)
 
     def _update_markers(self, index):
         # remove old lines and labels
@@ -469,34 +446,24 @@ class RunViewer(object):
 
         self._update_non_linear_time(changed_shot=True)
 
-        last_t = 0.0
-        last_color = (0, 0, 0)
+        times = sorted(list(self.all_markers.keys()))
         for i, (t, m) in enumerate(sorted(self.all_markers.items())):
-            if self.scale_time:
-                delta_t = t - self.scalehandler.get_unscaled_time(last_t)
-                t = shot.stop_time * i / float(len(self.all_markers))
+            if i < len(times)-1:
+                delta_t = times[i+1] - t
             else:
-                delta_t = t - last_t
+                delta_t = shot.stop_time - t
+
+            if self.scale_time:
+                t = self.scalehandler.get_scaled_time(t)
+
             color = m['color']
             color = QColor(color[0], color[1], color[2])
 
-            line = self._markers_plot[0].addLine(x=t, pen=pg.mkPen(color=color, width=1.5, style=Qt.DashLine))
-            marker_label = pg.TextItem(text=m['label'], color=color, anchor=(0, 1), fill=QColor(255, 255, 255, 200))
-            marker_label.setPos(t, (i % MARKERS_VERT_AMOUNT))
-            self._markers_plot[0].addItem(marker_label)  # add the marker label after the line so the text is in the foreground
-
-            self.all_marker_items[marker_label] = self._markers_plot[0]
+            line = self._markers_plot[0].addLine(x=t, pen=pg.mkPen(color=color, width=1.5, style=Qt.DashLine), label=m['label'], labelOpts= {"color": color, "fill": QColor(255, 255, 255, 255), "rotateAxis":(1, 0), "anchors": [(0.5, 0),(0.5, 0)]} )
             self.all_marker_items[line] = self._markers_plot[0]
 
-            line = self._time_axis_plot[0].addLine(x=t, pen=pg.mkPen(color=color, width=1.5, style=Qt.DashLine))
-            if not(i == 0 and t == 0):  # skip the first item if it's t=0
-                time_label = pg.TextItem(text=format_time(delta_t), color=last_color, anchor=(0, 1), fill=QColor(255, 255, 255, 200))
-                time_label.setPos(last_t, (i % MARKERS_VERT_AMOUNT))
-                self._time_axis_plot[0].addItem(time_label)
-                self.all_marker_items[time_label] = self._time_axis_plot[0]
+            line = self._time_axis_plot[0].addLine(x=t, pen=pg.mkPen(color=color, width=1.5, style=Qt.DashLine), label=format_time(delta_t), labelOpts= {"color": color, "fill": QColor(255, 255, 255, 255), "rotateAxis":(1, 0), "anchors": [(0.5, 0),(0.5, 0)]} )
             self.all_marker_items[line] = self._time_axis_plot[0]
-            last_t = t
-            last_color = color
 
         self.update_plots()
 
@@ -622,6 +589,8 @@ class RunViewer(object):
                 colour_item.setData(icon, Qt.DecorationRole)
                 shot_combobox_index = self.ui.markers_comboBox.findData(item.data())
                 self.ui.markers_comboBox.model().item(shot_combobox_index).setEnabled(True)
+                if self.ui.markers_comboBox.currentIndex() == 0:
+                    self.ui.markers_comboBox.setCurrentIndex(shot_combobox_index)
             else:
                 # colour = None
                 # icon = None
@@ -882,7 +851,7 @@ class RunViewer(object):
         self.plot_widgets[channel].sigXRangeChanged.connect(self.on_x_range_changed)
         self.ui.plot_layout.addWidget(self.plot_widgets[channel])
         self.shutter_lines[channel] = {}  # initialize Storage for shutter lines
-        self.plot_widgets[channel].scene().sigMouseMoved.connect(lambda pos: self.mouseMovedEvent(pos, self.plot_widgets[channel]))
+        self.plot_widgets[channel].scene().sigMouseMoved.connect(lambda pos: self.mouseMovedEvent(pos, self.plot_widgets[channel], channel))
         self.ui.plot_layout.insertWidget(self.ui.plot_layout.count() - 2, self.plot_widgets[channel])
 
         if digital:  # repalce y-tick-labels 0 with 'Lo' and 1 with 'Hi'
@@ -930,10 +899,11 @@ class RunViewer(object):
                             if not shutters_checked:
                                 line.hide()
 
+        labelStyle = {'font-size': '8pt'}
         if has_units:
-            self.plot_widgets[channel].setLabel('left', channel, units=units)
+            self.plot_widgets[channel].setLabel('left', channel, units=units, **labelStyle)
         else:
-            self.plot_widgets[channel].setLabel('left', channel)
+            self.plot_widgets[channel].setLabel('left', channel, **labelStyle)
 
     def on_x_range_changed(self, *args):
         # print 'x range changed'
