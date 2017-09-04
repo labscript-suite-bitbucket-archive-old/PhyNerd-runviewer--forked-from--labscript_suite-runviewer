@@ -305,8 +305,7 @@ class RunViewer(object):
         time_axis_plot.setMouseEnabled(y=False)
         time_axis_plot.getAxis('left').setTicks([])  # hide y ticks in the left & right side. only show time axis
         time_axis_plot.getAxis('right').setTicks([])
-        labelStyle = {'font-size': '8pt'}
-        time_axis_plot.setLabel('left', 'Slots', units=None, **labelStyle)
+        time_axis_plot.setLabel('left', '')
         time_axis_plot.scene().sigMouseMoved.connect(lambda pos: self.mouseMovedEvent(pos, time_axis_plot, "Slots"))
         time_axis_plot_item = time_axis_plot.plot([0, 1], [0, 0], pen=(255, 255, 255))
         self._time_axis_plot = (time_axis_plot, time_axis_plot_item)
@@ -322,8 +321,7 @@ class RunViewer(object):
         markers_plot.showAxis('right', True)
         markers_plot.getAxis('left').setTicks([])
         markers_plot.getAxis('right').setTicks([])
-        labelStyle = {'font-size': '8pt'}
-        markers_plot.setLabel('left', 'Markers', **labelStyle)
+        markers_plot.setLabel('left', '')
         markers_plot.setXLink('runviewer - time axis link')
         markers_plot.setMouseEnabled(y=False)
         markers_plot_item = markers_plot.plot([])
@@ -754,7 +752,7 @@ class RunViewer(object):
             largest_stop_time = 1.0
 
         # Update the range of the link plot
-        self._time_axis_plot[1].setData([0, largest_stop_time], [0, 1e-9])
+        self._time_axis_plot[1].setData([0, largest_stop_time], [0, 0])
 
         # Update plots
         for i in range(self.channel_model.rowCount()):
@@ -837,7 +835,7 @@ class RunViewer(object):
         self._resample = True
 
     def create_plot(self, channel, ticked_shots, digital=False):
-        self.plot_widgets[channel] = pg.PlotWidget()  # name=channel)
+        self.plot_widgets[channel] = pg.PlotWidget(title=channel)  # name=channel)
         if digital:
             self.plot_widgets[channel].setMinimumHeight(60)
             self.plot_widgets[channel].setMaximumHeight(60)
@@ -899,11 +897,10 @@ class RunViewer(object):
                             if not shutters_checked:
                                 line.hide()
 
-        labelStyle = {'font-size': '8pt'}
         if has_units:
-            self.plot_widgets[channel].setLabel('left', channel, units=units, **labelStyle)
+            self.plot_widgets[channel].setLabel('left', "", units=units)
         else:
-            self.plot_widgets[channel].setLabel('left', channel, **labelStyle)
+            self.plot_widgets[channel].setLabel('left', "")
 
     def on_x_range_changed(self, *args):
         # print 'x range changed'
