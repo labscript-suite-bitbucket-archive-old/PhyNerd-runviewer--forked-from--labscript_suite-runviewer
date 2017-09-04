@@ -840,8 +840,8 @@ class RunViewer(object):
             self.plot_widgets[channel].setMinimumHeight(60)
             self.plot_widgets[channel].setMaximumHeight(60)
         else:
-            self.plot_widgets[channel].setMinimumHeight(120)
-            self.plot_widgets[channel].setMaximumHeight(120)
+            self.plot_widgets[channel].setMinimumHeight(100)
+            self.plot_widgets[channel].setMaximumHeight(100)
         self.plot_widgets[channel].showAxis('right', True)
         self.plot_widgets[channel].showAxis('bottom', False)
         self.plot_widgets[channel].setMouseEnabled(y=False)
