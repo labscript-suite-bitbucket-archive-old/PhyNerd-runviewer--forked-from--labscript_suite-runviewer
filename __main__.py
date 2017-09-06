@@ -90,10 +90,32 @@ def set_win_appusermodel(window_id):
 
 
 SHOT_MODEL__COLOUR_INDEX = 0
-SHOT_MODEL__CHECKBOX_INDEX = 1
+SHOT_MODEL__SHUTTER_INDEX = 1
+SHOT_MODEL__CHECKBOX_INDEX = 2
 SHOT_MODEL__PATH_INDEX = 1
 CHANNEL_MODEL__CHECKBOX_INDEX = 0
 CHANNEL_MODEL__CHANNEL_INDEX = 0
+
+
+def format_time(input_sec):
+    # inout is the time in sec
+    sig_digit = numpy.round(numpy.log10(input_sec), 5)
+    if sig_digit >= 0:
+        return "{:.3g}s".format(input_sec)
+    elif sig_digit >= -3:
+        return "{:.3g}ms".format(input_sec * 1e3)
+    elif sig_digit >= -6:
+        return "{:.3g}us".format(input_sec * 1e6)
+    elif sig_digit >= -9:
+        return "{:.3g}ns".format(input_sec * 1e9)
+    elif sig_digit >= -12:
+        return "{:.3g}ps".format(input_sec * 1e12)
+    elif sig_digit >= -15:
+        return "{:.3g}fs".format(input_sec * 1e15)
+    elif sig_digit >= -18:
+        return "{:.3g}as".format(input_sec * 1e18)
+    else:
+        return str(input_sec) + "s"
 
 
 def int_to_enum(enum_list, value):
@@ -101,11 +123,97 @@ def int_to_enum(enum_list, value):
      can't be interpreted by QColor correctly (for example)
      unfortunately Qt doesn't provide a python list structure of enums, so you have to build the list yourself.
     """
-
     for item in enum_list:
         if item == value:
             return item
     return value
+
+
+def get_children(con_table, parent_dev):
+    res = {}
+    for name, child_con in parent_dev.child_list.items():
+        res[name] = child_con.device_class
+        if child_con.child_list:
+            res.update(get_children(con_table, child_con))
+    return res
+
+
+class DataSlot():
+
+    def __init__(self, prev_point, start, end, resulting_length):
+        start = float(start)
+        end = float(end)
+        resulting_length = float(resulting_length)
+
+        if start == end:
+            raise Exception("Start and End value must not be equal! start={:f}; end={:f}".format(start, end))
+
+        self.org_start = start  # original start point
+        self.org_end = end   # original end point
+        self.resulting_length = resulting_length
+
+        if prev_point is None:  # this is the first point
+            self.scaled_start = start
+            self.scaled_end = self.scaled_start + resulting_length  # /(end-start)
+        else:
+            self.scaled_start = prev_point.scaled_end
+            self.scaled_end = self.scaled_start + resulting_length  # /(end-start)
+
+    def get_scaled_time(self, input_t):
+        return self.scaled_start + self.resulting_length * (input_t - self.org_start) / (self.org_end - self.org_start)
+
+    def get_unscaled_time(self, input_scaled_t):
+        return self.org_start + (self.org_end - self.org_start) * (input_scaled_t - self.scaled_start) / self.resulting_length
+
+
+class ScaleHandler():
+
+    def __init__(self, input_times, stop_time, target_length=1.0):
+        # input_times is a list (may be unsorted) of times which should be scaled evenly with target_length
+        # an input list of [1,2,4,6] and target_length of 1.0 will result in:
+        # get_scaled_time(1)   -> 1
+        # get_scaled_time(1.5) -> 1.5
+        # get_scaled_time(3)   -> 2.5
+        # get_scaled_time(4)   -> 3
+        # get_scaled_time(5)   -> 3.5   ...
+        self.internal_list = []
+
+        self.org_stop_time = stop_time
+
+        self.last_index = 0
+
+        last_slot = None
+        last_x = 0
+        for t in sorted(input_times):
+            if t == 0:
+                continue  # skip the first point if it is 0. it will be automatically added in the next iteration
+            last_slot = DataSlot(last_slot, last_x, t, target_length)
+            self.internal_list.append(last_slot)
+            last_x = t
+
+        last_slot = DataSlot(last_slot, last_x, stop_time, target_length)  # add last scaling information from last marker to end
+        self.internal_list.append(last_slot)
+        self.scaled_stop_time = self.get_scaled_time(self.org_stop_time)
+
+    def get_scaled_time(self, input_t):
+        # this method returns the scaled time in the evenly distributed scale.
+        last_slot = self.internal_list[self.last_index]  # faster for multiple input times in the same time slot, so we dont have to search the right interval.
+        if last_slot.org_start <= input_t and last_slot.org_end >= input_t:
+            return last_slot.get_scaled_time(input_t)
+        else:
+            for index, i in enumerate(self.internal_list):
+                if i.org_start <= input_t and i.org_end >= input_t:
+                    self.last_index = index
+                    return i.get_scaled_time(input_t)
+
+        # time is greater then stop_time
+        return input_t - self.org_stop_time + self.scaled_stop_time
+
+    def get_unscaled_time(self, input_scaled_t):
+        for index, i in enumerate(self.internal_list):
+            if i.scaled_start <= input_scaled_t and i.scaled_end >= input_scaled_t:
+                return i.get_unscaled_time(input_scaled_t)
+        return input_scaled_t - self.scaled_stop_time + self.org_stop_time
 
 
 class ColourDelegate(QItemDelegate):
@@ -176,7 +284,7 @@ class RunViewer(object):
 
         # setup shot treeview model
         self.shot_model = QStandardItemModel()
-        self.shot_model.setHorizontalHeaderLabels(['colour', 'path'])
+        self.shot_model.setHorizontalHeaderLabels(['colour', 'shutters', 'path'])
         self.ui.shot_treeview.setModel(self.shot_model)
         self.ui.shot_treeview.resizeColumnToContents(0)
         self.shot_model.itemChanged.connect(self.on_shot_selection_changed)
@@ -190,15 +298,51 @@ class RunViewer(object):
         self.channel_model.itemChanged.connect(self.update_plots)
 
         # create a hidden plot widget that all plots can link their x-axis too
-        hidden_plot = pg.PlotWidget(name='runviewer - time axis link')
+        time_axis_plot = pg.PlotWidget(name='runviewer - time axis link')
 
-        hidden_plot.setMinimumHeight(40)
-        hidden_plot.setMaximumHeight(40)
-        hidden_plot.setLabel('bottom', 'Time', units='s')
-        hidden_plot.showAxis('right', True)
-        hidden_plot_item = hidden_plot.plot([0, 1], [0, 0])
-        self._hidden_plot = (hidden_plot, hidden_plot_item)
-        self.ui.plot_layout.addWidget(hidden_plot)
+        time_axis_plot.setMinimumHeight(120)
+        time_axis_plot.setMaximumHeight(120)
+        time_axis_plot.setLabel('bottom', 'Time', units='s')
+        time_axis_plot.showAxis('right', True)
+        time_axis_plot.setMouseEnabled(y=False)
+        time_axis_plot.getAxis('left').setTicks([])  # hide y ticks in the left & right side. only show time axis
+        time_axis_plot.getAxis('right').setTicks([])
+        time_axis_plot.setLabel('left', '')
+        time_axis_plot.scene().sigMouseMoved.connect(lambda pos: self.mouseMovedEvent(pos, time_axis_plot, "Slots"))
+        time_axis_plot_item = time_axis_plot.plot([0, 1], [0, 0], pen=(255, 255, 255))
+        self._time_axis_plot = (time_axis_plot, time_axis_plot_item)
+
+        self.all_markers = {}
+        self.all_marker_items = {}
+        markers_plot = pg.PlotWidget(name='runviewer - markers')
+        markers_plot.setMinimumHeight(120)
+        markers_plot.setMaximumHeight(120)
+        markers_plot.showAxis('top', False)
+        markers_plot.showAxis('bottom', False)
+        markers_plot.showAxis('left', True)
+        markers_plot.showAxis('right', True)
+        markers_plot.getAxis('left').setTicks([])
+        markers_plot.getAxis('right').setTicks([])
+        markers_plot.setLabel('left', '')
+        markers_plot.setXLink('runviewer - time axis link')
+        markers_plot.setMouseEnabled(y=False)
+        markers_plot_item = markers_plot.plot([])
+        markers_plot.scene().sigMouseMoved.connect(lambda pos: self.mouseMovedEvent(pos, markers_plot, "Markers"))
+        self._markers_plot = (markers_plot, markers_plot_item)
+
+        markers_plot.setParent(self.ui.scrollArea_2)
+        self.ui.plot_layout.addWidget(time_axis_plot)
+
+        self.ui.plot_layout.setContentsMargins(0, markers_plot.height()-1, 0, 0)
+
+        def resizeEvent(event):
+            rect = self.ui.scrollArea_2.viewport().geometry()
+            markers_plot.setGeometry(
+                0, 0,
+                rect.width(), 0)
+            QScrollArea.resizeEvent(self.ui.scrollArea_2, event)
+
+        self.ui.scrollArea_2.resizeEvent = resizeEvent
 
         # add some icons
         self.ui.add_shot.setIcon(QIcon(':/qtutils/fugue/plus'))
@@ -213,6 +357,7 @@ class RunViewer(object):
         self.ui.channel_move_to_bottom.setIcon(QIcon(':/qtutils/fugue/arrow-stop-270'))
         self.ui.reset_x_axis.setIcon(QIcon(':/qtutils/fugue/clock-history'))
         self.ui.reset_y_axis.setIcon(QIcon(':/qtutils/fugue/magnifier-history'))
+        self.ui.non_linear_time.setIcon(QIcon(':/qtutils/fugue/ui-ruler'))
 
         self.ui.actionOpen_Shot.setIcon(QIcon(':/qtutils/fugue/plus'))
         self.ui.actionQuit.setIcon(QIcon(':/qtutils/fugue/cross-button'))
@@ -234,6 +379,8 @@ class RunViewer(object):
         self.ui.enable_selected_shots.clicked.connect(self._enable_selected_shots)
         self.ui.disable_selected_shots.clicked.connect(self._disable_selected_shots)
         self.ui.add_shot.clicked.connect(self.on_add_shot)
+        self.ui.markers_comboBox.currentIndexChanged.connect(self._update_markers)
+        self.ui.non_linear_time.toggled.connect(self._toggle_non_linear_time)
 
         self.ui.actionOpen_Shot.triggered.connect(self.on_add_shot)
         self.ui.actionQuit.triggered.connect(self.ui.close)
@@ -249,6 +396,8 @@ class RunViewer(object):
         #self._channels_list = {}
         self.plot_widgets = {}
         self.plot_items = {}
+        self.shutter_lines = {}
+        self.all_output_types = {}
 
         self.last_opened_shots_folder = exp_config.get('paths', 'experiment_shot_storage')
 
@@ -263,10 +412,131 @@ class RunViewer(object):
         self._shots_to_process_thread.daemon = True
         self._shots_to_process_thread.start()
 
+        self.scale_time = False
+        self.scaler = numpy.vectorize(lambda x: x)
+        self.scalehandler = None
+
+    def mouseMovedEvent(self, position, ui, name):
+        v = ui.scene().views()[0]
+        viewP = v.mapFromScene(position)
+        glob_pos = ui.mapToGlobal(viewP)  # convert to Screen x
+        glob_zero = ui.mapToGlobal(QPoint(0, 0))
+        self._global_start_x = glob_zero.x()
+        self._global_start_y = glob_zero.y()
+        self._global_width = ui.width()
+        self._global_height = ui.height()
+
+        coord_pos = ui.plotItem.vb.mapSceneToView(position)
+
+        if len(self.get_selected_shots_and_colours()) > 0:
+            if self.scale_time and self.scalehandler is not None:
+                unscaled_t = self.scalehandler.get_unscaled_time(coord_pos.x())
+            else:
+                unscaled_t = coord_pos.x()
+
+            if unscaled_t is not None:
+                pos = QPoint(glob_pos.x(), glob_pos.y())
+                text = "Plot: {} \nTime: {:.4f}ms\nValue: {:.2f}".format(name, unscaled_t * 1000, coord_pos.y())
+                QToolTip.showText(pos, text)
+
+    def _update_markers(self, index):
+        # remove old lines and labels
+        for line, plot in self.all_marker_items.items():
+            plot.removeItem(line)
+        self.all_marker_items = {}
+
+        shot = self.ui.markers_comboBox.currentData()
+        self.all_markers = shot.markers if index > 0 else {}
+
+        self._update_non_linear_time(changed_shot=True)
+
+        times = sorted(list(self.all_markers.keys()))
+        for i, (t, m) in enumerate(sorted(self.all_markers.items())):
+            if i < len(times)-1:
+                delta_t = times[i+1] - t
+            else:
+                delta_t = shot.stop_time - t
+
+            if self.scale_time:
+                t = self.scalehandler.get_scaled_time(t)
+
+            color = m['color']
+            color = QColor(color[0], color[1], color[2])
+
+            line = self._markers_plot[0].addLine(x=t, pen=pg.mkPen(color=color, width=1.5, style=Qt.DashLine), label=m['label'], labelOpts= {"color": color, "fill": QColor(255, 255, 255, 255), "rotateAxis":(1, 0), "anchors": [(0.5, 0),(0.5, 0)]} )
+            self.all_marker_items[line] = self._markers_plot[0]
+
+            line = self._time_axis_plot[0].addLine(x=t, pen=pg.mkPen(color=color, width=1.5, style=Qt.DashLine), label=format_time(delta_t), labelOpts= {"color": color, "fill": QColor(255, 255, 255, 255), "rotateAxis":(1, 0), "anchors": [(0.5, 0),(0.5, 0)]} )
+            self.all_marker_items[line] = self._time_axis_plot[0]
+
+        self.update_plots()
+
+    def _toggle_non_linear_time(self, state):
+        self.scale_time = state
+        self._update_non_linear_time()
+
+    def _update_non_linear_time(self, changed_shot=False):
+        old_scalerhandler = self.scalehandler
+        shot = self.ui.markers_comboBox.currentData()
+        if shot is not None and self.scale_time:
+            self.scalehandler = shot.scalehandler
+            self.scaler = shot.scaler
+        else:
+            self.scalehandler = None
+            self.scaler = numpy.vectorize(lambda x: x)
+
+        # combine markers and shutter lines
+        markers = list(self.all_marker_items.keys())
+        for channel in self.shutter_lines:
+            for shot in self.shutter_lines[channel]:
+                for line in self.shutter_lines[channel][shot][0]:
+                    markers.append(line)
+                for line in self.shutter_lines[channel][shot][1]:
+                    markers.append(line)
+
+        # Move all Markes/Shutter Lines to new position
+        for marker in markers:
+            pos = marker.pos()
+
+            if old_scalerhandler is None:
+                unscaled_x = pos.x()
+            else:
+                unscaled_x = old_scalerhandler.get_unscaled_time(pos.x())
+
+            if self.scale_time and self.scalehandler is not None:
+                new_x = self.scalehandler.get_scaled_time(unscaled_x)
+            else:
+                new_x = unscaled_x
+
+            pos.setX(new_x)
+            marker.setPos(pos)
+
+        if shot is not None and self.scale_time:
+            self._time_axis_plot[0].getAxis("bottom").setTicks([[[0, 0], [shot.stop_time, shot.stop_time]]])
+        else:
+            self._time_axis_plot[0].getAxis("bottom").setTicks(None)
+
+        self._resample = True
+
     def _process_shots(self):
         while True:
             filepath = shots_to_process_queue.get()
             inmain_later(self.load_shot, filepath)
+
+    def on_toggle_shutter(self, checked, current_shot):
+        for channel in self.shutter_lines:
+            for shot in self.shutter_lines[channel]:
+                if shot == current_shot:
+                    for line in self.shutter_lines[channel][shot][0]:
+                        if checked:
+                            line.show()
+                        else:
+                            line.hide()
+                    for line in self.shutter_lines[channel][shot][1]:
+                        if checked:
+                            line.show()
+                        else:
+                            line.hide()
 
     def on_load_channel_config(self):
         config_file = QFileDialog.getOpenFileName(self.ui, "Select file to load", self.last_opened_shots_folder, "Config files (*.ini)")
@@ -307,7 +577,6 @@ class RunViewer(object):
                 channels[item.text()] = item.checkState() == Qt.Checked
 
             runviewer_config.set('runviewer_state', 'Channels', pprint.pformat(channels))
-
 
     def on_add_shot(self):
         selected_files = QFileDialog.getOpenFileNames(self.ui, "Select file to load", self.last_opened_shots_folder, "HDF5 files (*.h5 *.hdf5)")
@@ -362,9 +631,17 @@ class RunViewer(object):
                 icon = QIcon(pixmap)
                 colour_item.setData(lambda clist=self.shot_colour_delegate._colours, colour=colour: int_to_enum(clist, colour), Qt.UserRole)
                 colour_item.setData(icon, Qt.DecorationRole)
+                shot_combobox_index = self.ui.markers_comboBox.findData(item.data())
+                self.ui.markers_comboBox.model().item(shot_combobox_index).setEnabled(True)
+                if self.ui.markers_comboBox.currentIndex() == 0:
+                    self.ui.markers_comboBox.setCurrentIndex(shot_combobox_index)
             else:
                 # colour = None
                 # icon = None
+                shot_combobox_index = self.ui.markers_comboBox.findData(item.data())
+                self.ui.markers_comboBox.model().item(shot_combobox_index).setEnabled(False)
+                if shot_combobox_index == self.ui.markers_comboBox.currentIndex():
+                    self.ui.markers_comboBox.setCurrentIndex(0)
                 colour_item.setEditable(False)
 
             # model.setData(index, editor.itemIcon(editor.currentIndex()),
@@ -383,6 +660,9 @@ class RunViewer(object):
                     if shot == current_shot:
                         colour = item.data(Qt.UserRole)
                         self.plot_items[channel][shot].setPen(pg.mkPen(QColor(colour()), width=2))
+        elif self.shot_model.indexFromItem(item).column() == SHOT_MODEL__SHUTTER_INDEX:
+            current_shot = self.shot_model.item(self.shot_model.indexFromItem(item).row(), SHOT_MODEL__CHECKBOX_INDEX).data()
+            self.on_toggle_shutter(item.checkState(), current_shot)
 
     def load_shot(self, filepath):
         shot = Shot(filepath)
@@ -394,6 +674,12 @@ class RunViewer(object):
         colour_item.setEditable(False)
         colour_item.setToolTip('Double-click to change colour')
         items.append(colour_item)
+
+        check_shutter = QStandardItem()
+        check_shutter.setCheckable(True)
+        check_shutter.setCheckState(Qt.Unchecked)  # options are Qt.Checked OR Qt.Unchecked
+        check_shutter.setToolTip("Toggle shutter markers")
+        items.append(check_shutter)
 
         check_item = QStandardItem(shot.path)
         check_item.setEditable(False)
@@ -407,7 +693,9 @@ class RunViewer(object):
         # path_item.setEditable(False)
         # items.append(path_item)
         self.shot_model.appendRow(items)
-
+        self.ui.markers_comboBox.addItem(os.path.basename(shot.path), shot)
+        shot_combobox_index = self.ui.markers_comboBox.findData(shot)
+        self.ui.markers_comboBox.model().item(shot_combobox_index).setEnabled(False)
         # only do this if we are checking the shot we are adding
         # self.update_channels_treeview()
 
@@ -417,10 +705,11 @@ class RunViewer(object):
         for i in range(self.shot_model.rowCount()):
             item = self.shot_model.item(i, SHOT_MODEL__CHECKBOX_INDEX)
             colour_item = self.shot_model.item(i, SHOT_MODEL__COLOUR_INDEX)
+            shutter_item = self.shot_model.item(i, SHOT_MODEL__SHUTTER_INDEX)
             if item.checkState() == Qt.Checked:
                 shot = item.data()
                 colour_item_data = colour_item.data(Qt.UserRole)
-                ticked_shots[shot] = colour_item_data()
+                ticked_shots[shot] = (colour_item_data(), shutter_item.checkState())
         return ticked_shots
 
     def update_channels_treeview(self):
@@ -478,12 +767,18 @@ class RunViewer(object):
                 item.setSelectable(False)
 
         # TODO: Also update entries in groups
-
         self.update_plots()
 
     def update_plots(self):
         # get list of selected shots
         ticked_shots = self.get_selected_shots_and_colours()
+
+        # get Output types
+        for shot in ticked_shots.keys():
+            for name, clazz in shot.connection_table.get_attached_devices().items():
+                dev = shot.connection_table.find_by_name(name)
+                self.all_output_types[name] = clazz
+                self.all_output_types.update(get_children(shot.connection_table, dev))
 
         # SHould we rescale the x-axis?
         # if self._hidden_plot[0].getViewBox.getState()['autoRange'][0]:
@@ -492,6 +787,7 @@ class RunViewer(object):
         #    self._hidden_plot[0].enableAutoRange(axis=pg.ViewBox.XAxis, enable=False)
 
         # find stop time of longest ticked shot
+
         largest_stop_time = 0
         stop_time_set = False
         for shot in ticked_shots.keys():
@@ -502,7 +798,7 @@ class RunViewer(object):
             largest_stop_time = 1.0
 
         # Update the range of the link plot
-        self._hidden_plot[1].setData([0, largest_stop_time], [0, 1e-9])
+        self._time_axis_plot[1].setData([0, largest_stop_time], [0, 0])
 
         # Update plots
         for i in range(self.channel_model.rowCount()):
@@ -519,42 +815,98 @@ class RunViewer(object):
                     for shot in self.plot_items[channel]:
                         if shot not in ticked_shots.keys():
                             self.plot_widgets[channel].removeItem(self.plot_items[channel][shot])
+                            # Remove Shutter Markers of unticked Shots
+                            if shot in self.shutter_lines[channel]:
+                                for line in self.shutter_lines[channel][shot][0]:
+                                    self.plot_widgets[channel].removeItem(line)
+                                for line in self.shutter_lines[channel][shot][1]:
+                                    self.plot_widgets[channel].removeItem(line)
+                                self.shutter_lines[channel].pop(shot)
                             to_delete.append(shot)
                     for shot in to_delete:
                         del self.plot_items[channel][shot]
 
                     # do we need to add any plot items for shots that were not previously selected?
-                    for shot, colour in ticked_shots.items():
+                    for shot, (colour, shutters_checked) in ticked_shots.items():
                         if shot not in self.plot_items[channel]:
                             # plot_item = self.plot_widgets[channel].plot(shot.traces[channel][0], shot.traces[channel][1], pen=pg.mkPen(QColor(colour), width=2))
                             # Add empty plot as it the custom resampling we do will happen quicker if we don't attempt to first plot all of the data
                             plot_item = self.plot_widgets[channel].plot([0, 0], [0], pen=pg.mkPen(QColor(colour), width=2), stepMode=True)
                             self.plot_items[channel][shot] = plot_item
 
+                        # Add Shutter Markers of newly ticked Shots
+                        if shot not in self.shutter_lines[channel] and channel in shot.shutter_times:
+                            self.shutter_lines[channel][shot] = [[], []]
+
+                            open_color = QColor(0, 255, 0)
+                            close_color = QColor(255, 0, 0)
+
+                            for t, val in shot.shutter_times[channel].items():
+                                if self.scale_time:
+                                    t = self.scaler(t)
+                                if val:  # val != 0, shutter open
+                                    line = self.plot_widgets[channel].addLine(x=t, pen=pg.mkPen(color=open_color, width=4., style=Qt.DotLine))
+                                    self.shutter_lines[channel][shot][1].append(line)
+                                    if not shutters_checked:
+                                        line.hide()
+                                else:  # else shutter close
+                                    line = self.plot_widgets[channel].addLine(x=t, pen=pg.mkPen(color=close_color, width=4., style=Qt.DotLine))
+                                    self.shutter_lines[channel][shot][0].append(line)
+                                    if not shutters_checked:
+                                        line.hide()
+
+                    for t, m in self.all_markers.items():
+                        color = m['color']
+                        color = QColor(color[0], color[1], color[2])
+                        if self.scale_time:
+                            t = self.scaler(t)
+                        line = self.plot_widgets[channel].addLine(x=t, pen=pg.mkPen(color=color, width=1.5, style=Qt.DashLine))
+                        self.all_marker_items[line] = self.plot_widgets[channel]
+
                 # If no, create one
                 else:
-                    self.create_plot(channel, ticked_shots)
+                    if self.all_output_types[channel] in ("Shutter", "DigitalOut", "ClockLine"):
+                        self.create_plot(channel, ticked_shots, digital=True)
+                    else:
+                        self.create_plot(channel, ticked_shots, digital=False)
 
             else:
                 if channel not in self.plot_widgets:
-                    self.create_plot(channel, ticked_shots)
+                    if self.all_output_types[channel] in ("Shutter", "DigitalOut", "ClockLine"):
+                        self.create_plot(channel, ticked_shots, digital=True)
+                    else:
+                        self.create_plot(channel, ticked_shots, digital=False)
                 self.plot_widgets[channel].hide()
 
         self._resample = True
 
-    def create_plot(self, channel, ticked_shots):
-        self.plot_widgets[channel] = pg.PlotWidget()  # name=channel)
-        self.plot_widgets[channel].setMinimumHeight(200)
-        self.plot_widgets[channel].setMaximumHeight(200)
-        self.plot_widgets[channel].setLabel('bottom', 'Time', units='s')
+    def create_plot(self, channel, ticked_shots, digital=False):
+        self.plot_widgets[channel] = pg.PlotWidget(title=channel)  # name=channel)
+        if digital:
+            self.plot_widgets[channel].setMinimumHeight(60)
+            self.plot_widgets[channel].setMaximumHeight(60)
+        else:
+            self.plot_widgets[channel].setMinimumHeight(100)
+            self.plot_widgets[channel].setMaximumHeight(100)
         self.plot_widgets[channel].showAxis('right', True)
+        self.plot_widgets[channel].showAxis('bottom', False)
+        self.plot_widgets[channel].setMouseEnabled(y=False)
         self.plot_widgets[channel].setXLink('runviewer - time axis link')
         self.plot_widgets[channel].sigXRangeChanged.connect(self.on_x_range_changed)
         self.ui.plot_layout.addWidget(self.plot_widgets[channel])
+        self.shutter_lines[channel] = {}  # initialize Storage for shutter lines
+        self.plot_widgets[channel].scene().sigMouseMoved.connect(lambda pos: self.mouseMovedEvent(pos, self.plot_widgets[channel], channel))
+        self.ui.plot_layout.insertWidget(self.ui.plot_layout.count() - 2, self.plot_widgets[channel])
+
+        if digital:  # repalce y-tick-labels 0 with 'Lo' and 1 with 'Hi'
+            ax = self.plot_widgets[channel].getAxis('left')
+            ax.setTicks([[(0, 'Lo'), (1, 'Hi')]])
+            ax = self.plot_widgets[channel].getAxis('right')
+            ax.setTicks([[(0, 'Lo'), (1, 'Hi')]])
 
         has_units = False
         units = ''
-        for shot, colour in ticked_shots.items():
+        for shot, (colour, shutters_checked) in ticked_shots.items():
             if channel in shot.traces:
                 # plot_item = self.plot_widgets[channel].plot(shot.traces[channel][0], shot.traces[channel][1], pen=pg.mkPen(QColor(colour), width=2))
                 # Add empty plot as it the custom resampling we do will happen quicker if we don't attempt to first plot all of the data
@@ -566,10 +918,35 @@ class RunViewer(object):
                     has_units = True
                     units = shot.traces[channel][2]
 
+                # Add Shutter Markers of ticked Shots
+                if shot not in self.shutter_lines[channel] and channel in shot.shutter_times:
+                    self.shutter_lines[channel][shot] = [[], []]
+
+                    if len(ticked_shots) < 2:
+                        open_color = QColor(0, 255, 0)
+                        close_color = QColor(255, 0, 0)
+                    else:
+                        open_color = QColor(colour)
+                        close_color = QColor(colour)
+
+                    for t, val in shot.shutter_times[channel].items():
+                        if self.scale_time:
+                            t = self.scaler(t)
+                        if val:  # val != 0, shutter open
+                            line = self.plot_widgets[channel].addLine(x=t, pen=pg.mkPen(color=open_color, width=4., style=Qt.DotLine))
+                            self.shutter_lines[channel][shot][1].append(line)
+                            if not shutters_checked:
+                                line.hide()
+                        else:  # else shutter close
+                            line = self.plot_widgets[channel].addLine(x=t, pen=pg.mkPen(color=close_color, width=4., style=Qt.DotLine))
+                            self.shutter_lines[channel][shot][0].append(line)
+                            if not shutters_checked:
+                                line.hide()
+
         if has_units:
-            self.plot_widgets[channel].setLabel('left', channel, units=units)
+            self.plot_widgets[channel].setLabel('left', "", units=units)
         else:
-            self.plot_widgets[channel].setLabel('left', channel)
+            self.plot_widgets[channel].setLabel('left', "")
 
     def on_x_range_changed(self, *args):
         # print 'x range changed'
@@ -790,7 +1167,7 @@ class RunViewer(object):
                 self._resample = False
                 # print 'resampling'
                 ticked_shots = inmain(self.get_selected_shots_and_colours)
-                for shot, colour in ticked_shots.items():
+                for shot, (colour, shutters_checked) in ticked_shots.items():
                     for channel in shot.traces:
                         if self.channel_checked_and_enabled(channel):
                             try:
@@ -800,7 +1177,10 @@ class RunViewer(object):
                                 # doesn't immediately go off the edge of the data, and the
                                 # next resampling might have time to fill in more data before
                                 # the user sees any empty space.
-                                xnew, ynew = self.resample(shot.traces[channel][0], shot.traces[channel][1], xmin, xmax, shot.stop_time, dx)
+                                if self.scale_time:
+                                    xnew, ynew = self.resample(shot.scaled_times(channel), shot.traces[channel][1], xmin, xmax, shot.stop_time, dx)
+                                else:
+                                    xnew, ynew = self.resample(shot.traces[channel][0], shot.traces[channel][1], xmin, xmax, shot.stop_time, dx)
                                 inmain(self.plot_items[channel][shot].setData, xnew, ynew, pen=pg.mkPen(QColor(colour), width=2), stepMode=True)
                             except Exception:
                                 #self._resample = True
@@ -822,7 +1202,7 @@ class RunViewer(object):
         return False
 
     def on_x_axis_reset(self):
-        self._hidden_plot[0].enableAutoRange(axis=pg.ViewBox.XAxis)
+        self._time_axis_plot[0].enableAutoRange(axis=pg.ViewBox.XAxis)
 
     def on_y_axes_reset(self):
         for plot_widget in self.plot_widgets.values():
@@ -957,6 +1337,16 @@ class Shot(object):
         self._traces = None
         # store list of channels
         self._channels = None
+        # store list of markers
+        self._markers = None
+        self.cached_scaler = None
+        self._scaler = None
+        self._scalehandler = None
+        self._scaled_x = {}
+
+        # store list of shutter changes and callibrations
+        self._shutter_times = None
+        self._shutter_calibrations = {}
 
         # TODO: Get this dynamically
         device_list = ['PulseBlaster', 'NI_PCIe_6363', 'NI_PCI_6733']
@@ -974,6 +1364,10 @@ class Shot(object):
 
             self.device_names = file['devices'].keys()
 
+            # Get Shutter Calibrations
+            for name, open_delay, close_delay in numpy.array(file['calibrations']['Shutter']):
+                self._shutter_calibrations[name] = [open_delay, close_delay]
+
     def delete_cache(self):
         self._channels = None
         self._traces = None
@@ -983,16 +1377,48 @@ class Shot(object):
             self._channels = {}
         if self._traces is None:
             self._traces = {}
+        if self._shutter_times is None:
+            self._shutter_times = {}
+        if self._markers is None:
+            self._markers = {}
 
+        self._load_markers()
         # Let's walk the connection table, starting with the master pseudoclock
         master_pseudoclock_device = self.connection_table.find_by_name(self.master_pseudoclock_name)
 
         self._load_device(master_pseudoclock_device)
 
+        length_slot = self.stop_time / float(len(self._markers)+1)
+        self._scalehandler = ScaleHandler(self._markers.keys(), self.stop_time, length_slot)
+        self._scaler = numpy.vectorize(self._scalehandler.get_scaled_time)
+
+    def _load_markers(self):
+        with h5py.File(self.path, 'r') as file:
+            if "time_markers" in file:
+                for row in file["time_markers"]:
+                    self._markers[row['time']] = {'color': row['color'].tolist()[0], 'label': row['label']}
+            elif "runviewer" in file:
+                for time, val in file["runviewer"]["markers"].attrs.items():
+                    props = val.strip('{}}').rsplit(",", 1)
+                    color = list(map(int, props[0].split(":")[1].strip(" ()").split(",")))
+                    label = props[1].split(":")[1]
+                    self._markers[float(time)] = {'color': color, 'label': label}
+
     def add_trace(self, name, trace, parent_device_name, connection):
         name = unicode(name)
         self._channels[name] = {'device_name': parent_device_name, 'port': connection}
         self._traces[name] = trace
+
+    # Temporary solution to physical shutter times
+    def add_shutter_times(self, shutters):
+        for name, open_state in shutters:
+            x_values, y_values = self._traces[name]
+            values = zip(x_values, y_values)
+            change_values = [values[0]]
+            for i in range(1, len(values)):
+                if values[i][1] != values[i - 1][1]:
+                    change_values.append(values[i])
+            self._shutter_times[name] = {x_value + (self._shutter_calibrations[name][0] if y_value == open_state else self._shutter_calibrations[name][1]): 1 if y_value == open_state else 0 for x_value, y_value in change_values}
 
     def _load_device(self, device, clock=None):
         try:
@@ -1019,6 +1445,29 @@ class Shot(object):
             else:
                 print 'Failed to load device (unknown name, device object does not have attribute name)'
 
+        # get all Shutters with their open_state
+        try:
+            shutters = [(name, child_con.properties['open_state']) for name, child_con in device.child_list.items() if child_con.device_class == "Shutter"]
+        except KeyError:
+            # no openstate in connection table
+            with h5py.File(self.path, 'r') as file:
+                if "runviewer" in file:
+                    if "shutter_times" in file["runviewer"]:
+                        for name, val in file["runviewer"]["shutter_times"].attrs.items():
+                            self._shutter_times[name] = {float(key_value.split(":")[0]): int(key_value.split(":")[1]) for key_value in val.strip('{}}').split(",")}
+            pass
+        else:
+            self.add_shutter_times(shutters)
+
+    def scaled_times(self, channel):
+        if self.cached_scaler != app.scaler:
+            self.cached_scaler = app.scaler
+            self._scaled_x = {}
+        if channel not in self._scaled_x:
+            self._scaled_x[channel] = self.cached_scaler(self._traces[channel][0])
+
+        return self._scaled_x[channel]
+
     @property
     def channels(self):
         if self._channels is None:
@@ -1031,12 +1480,36 @@ class Shot(object):
         pass
 
     @property
+    def markers(self):
+        if self._markers is None:
+            self._load()
+        return self._markers
+
+    @property
     def traces(self):
         # if traces cached:
         #    return cached traces and waits
         if self._traces is None:
             self._load()
         return self._traces
+
+    @property
+    def shutter_times(self):
+        if self._shutter_times is None:
+            self._load()
+        return self._shutter_times
+
+    @property
+    def scalehandler(self):
+        if self._scalehandler is None:
+            self._load()
+        return self._scalehandler
+
+    @property
+    def scaler(self):
+        if self._scaler is None:
+            self._load()
+        return self._scaler
 
 
 class TempShot(Shot):
