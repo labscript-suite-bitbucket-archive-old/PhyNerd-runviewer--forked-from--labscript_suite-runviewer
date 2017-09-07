@@ -1414,11 +1414,12 @@ class Shot(object):
         for name, open_state in shutters:
             x_values, y_values = self._traces[name]
             values = zip(x_values, y_values)
-            change_values = [values[0]]
-            for i in range(1, len(values)):
-                if values[i][1] != values[i - 1][1]:
-                    change_values.append(values[i])
-            self._shutter_times[name] = {x_value + (self._shutter_calibrations[name][0] if y_value == open_state else self._shutter_calibrations[name][1]): 1 if y_value == open_state else 0 for x_value, y_value in change_values}
+            if len(values) > 0:
+                change_values = [values[0]]
+                for i in range(1, len(values)):
+                    if values[i][1] != values[i - 1][1]:
+                        change_values.append(values[i])
+                self._shutter_times[name] = {x_value + (self._shutter_calibrations[name][0] if y_value == open_state else self._shutter_calibrations[name][1]): 1 if y_value == open_state else 0 for x_value, y_value in change_values}
 
     def _load_device(self, device, clock=None):
         try:
