@@ -369,6 +369,25 @@ QToolButton:hover:checked {
            </widget>
           </item>
           <item>
+           <widget class="QComboBox" name="markers_comboBox">
+            <item>
+             <property name="text">
+              <string>Select Markers</string>
+             </property>
+            </item>
+           </widget>
+          </item>
+          <item>
+           <widget class="QPushButton" name="non_linear_time">
+            <property name="toolTip">
+             <string>Nonlinear Time</string>
+            </property>
+            <property name="checkable">
+             <bool>true</bool>
+            </property>
+           </widget>
+          </item>
+          <item>
            <spacer name="horizontalSpacer_3">
             <property name="orientation">
              <enum>Qt::Horizontal</enum>
@@ -462,6 +481,9 @@ QToolButton:hover:checked {
     </property>
     <addaction name="actionOpen_Shot"/>
     <addaction name="separator"/>
+    <addaction name="actionLoad_channel_config"/>
+    <addaction name="actionSave_channel_config"/>
+    <addaction name="separator"/>
     <addaction name="actionQuit"/>
    </widget>
    <addaction name="menuFile"/>
@@ -484,6 +506,16 @@ QToolButton:hover:checked {
   <action name="actionQuit">
    <property name="text">
     <string>Quit</string>
+   </property>
+  </action>
+  <action name="actionLoad_channel_config">
+   <property name="text">
+    <string>Load channel config</string>
+   </property>
+  </action>
+  <action name="actionSave_channel_config">
+   <property name="text">
+    <string>Save channel config</string>
    </property>
   </action>
  </widget>
