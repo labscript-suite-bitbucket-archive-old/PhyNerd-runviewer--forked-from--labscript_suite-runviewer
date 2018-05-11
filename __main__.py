@@ -353,6 +353,7 @@ class RunViewer(object):
         self.plot_widgets = {}
         self.plot_items = {}
         self.shutter_lines = {}
+        self.all_output_types = {}
 
         try:
             self.default_config_path = os.path.join(exp_config.get('DEFAULT', 'app_saved_configs'), 'runviewer')
@@ -797,6 +798,10 @@ class RunViewer(object):
         # get list of selected shots
         ticked_shots = self.get_selected_shots_and_colours()
 
+        # get Output types
+        for shot in ticked_shots.keys():
+            self.all_output_types.update(shot.output_types)
+
         # SHould we rescale the x-axis?
         # if self._hidden_plot[0].getViewBox.getState()['autoRange'][0]:
         #    self._hidden_plot[0].enableAutoRange(axis=pg.ViewBox.XAxis)
@@ -864,19 +869,23 @@ class RunViewer(object):
 
                 # If no, create one
                 else:
-                    self.create_plot(channel, ticked_shots)
+                    self.create_plot(channel, ticked_shots, digital=self.all_output_types[channel] in ("Shutter", "DigitalOut", "ClockLine"))
 
             else:
                 if channel not in self.plot_widgets:
-                    self.create_plot(channel, ticked_shots)
+                    self.create_plot(channel, ticked_shots, digital=self.all_output_types[channel] in ("Shutter", "DigitalOut", "ClockLine"))
                 self.plot_widgets[channel].hide()
 
         self._resample = True
 
-    def create_plot(self, channel, ticked_shots):
+    def create_plot(self, channel, ticked_shots, digital=False):
         self.plot_widgets[channel] = pg.PlotWidget()  # name=channel)
-        self.plot_widgets[channel].setMinimumHeight(200)
-        self.plot_widgets[channel].setMaximumHeight(200)
+        if digital:
+            self.plot_widgets[channel].setMinimumHeight(100)
+            self.plot_widgets[channel].setMaximumHeight(100)
+        else:
+            self.plot_widgets[channel].setMinimumHeight(200)
+            self.plot_widgets[channel].setMaximumHeight(200)
         self.plot_widgets[channel].setLabel('bottom', 'Time', units='s')
         self.plot_widgets[channel].showAxis('right', True)
         self.plot_widgets[channel].showAxis('bottom', True)
@@ -902,6 +911,12 @@ class RunViewer(object):
 
                 # Add Shutter Markers of ticked Shots
                 self.add_shutter_markers(shot, channel, shutters_checked)
+
+        if digital:  # repalce y-tick-labels 0 with 'Lo' and 1 with 'Hi'
+            ax = self.plot_widgets[channel].getAxis('left')
+            ax.setTicks([[(0, 'Lo'), (1, 'Hi')]])
+            ax = self.plot_widgets[channel].getAxis('right')
+            ax.setTicks([[(0, 'Lo'), (1, 'Hi')]])
 
         if has_units:
             self.plot_widgets[channel].setLabel('left', channel, units=units)
@@ -1326,6 +1341,7 @@ class Shot(object):
 
         # store list of shutter changes and callibrations
         self._shutter_times = None
+        self._output_types = None
         self._shutter_calibrations = {}
 
         # TODO: Get this dynamically
@@ -1366,6 +1382,8 @@ class Shot(object):
             self._markers = {}
         if self._shutter_times is None:
             self._shutter_times = {}
+        if self._output_types is None:
+            self._output_types = {}
 
         self._load_markers()
         # Let's walk the connection table, starting with the master pseudoclock
@@ -1397,6 +1415,7 @@ class Shot(object):
             con = self.connection_table.find_by_name(name)
             if con.device_class == "Shutter":
                 self.add_shutter_times([(name, con.properties['open_state'])])
+            self._output_types[name] = con.device_class
         except KeyError:
             pass
 
@@ -1483,6 +1502,12 @@ class Shot(object):
         if self._shutter_times is None:
             self._load()
         return self._shutter_times
+
+    @property
+    def output_types(self):
+        if self._output_types is None:
+            self._load()
+        return self._output_types
 
     @property
     def scalehandler(self):
